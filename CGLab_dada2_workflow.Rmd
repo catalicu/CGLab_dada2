@@ -1,0 +1,176 @@
+---
+title: "CGLab_dada2_workflow"
+author: "Dr CG"
+date: '2022-06-24'
+output: html_document
+---
+# Using dada2 to generate ASV and taxonomic tables
+This code processes sequences demultiplexed with idemp. It then outputs ASV tables to conduct downstream analyses.
+See a referecence tutorial [HERE](https://benjjneb.github.io/dada2/tutorial.html)
+
+
+##Preparation
+### Load required packages
+```{r}
+library(Rcpp) #1.0.8.3
+library(dada2) #1.24.0
+library(phyloseq) #1.40.0
+library(ggplot2) #3.3.6
+```
+
+### Establish path to the demultiplexed files
+Replace the path below with the location of your files. The list.files() function should list them correctly. 
+
+```{r}
+Path.seq="/Users/YourName/YourPath"
+list.files(Path.seq)
+```
+
+### Save current date
+This will be useful as you save files, and to prevent overwriting files
+```{r}
+Curr.date=Sys.Date()
+```
+
+
+### Process sample names:
+
+You can also embed plots, for example:
+
+```{r }
+# Forward and reverse fastq filenames :
+fnFs <- sort(list.files(Path.seq, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(Path.seq, pattern="_R2_001.fastq", full.names = TRUE))
+
+# Extract sample names. This part of the code may change depending on sample naming format
+# check how the sample names can be split
+strsplit(basename(fnFs), ".", fixed=TRUE)
+# extact the parts of the name and paste them together
+# the '[' is like [] for sapply
+sample.treatment.rep <- sapply(strsplit(basename(fnFs), ".", fixed=TRUE), `[`, 2)
+
+sample.names=paste(treatment=substr(sample.treatment.rep, 7,15), rep=substr(sample.treatment.rep, 6,6), sep='_')
+metadata=data.frame(sample.names,treatment=substr(sample.treatment.rep, 5,5), rep=substr(sample.treatment.rep, 6,6))
+#write.table(metadata, file='raw_metadata_from_seq.txt', sep='\t')
+
+#sort(sample.names)
+
+```
+
+and plot your findings
+
+```{r}
+
+plotQualityProfile(fnFs[1:2])
+plotQualityProfile(fnRs[1:2])
+```
+
+## Processing your sequences
+### Filter low quality reads
+```{r}
+filtFs=file.path(Path.seq, 'filtered', paste0(sample.names,'_R1_filt.fastq.gz'))
+filtRs=file.path(Path.seq, 'filtered', paste0(sample.names,'_R2_filt.fastq.gz'))
+
+OUT=filterAndTrim(fwd=fnFs, filt=filtFs, rev=fnRs, filt.rev=filtRs, truncLen=c(200, 180), maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE, compress=TRUE, multithread=TRUE)
+head(OUT)
+
+```
+
+### Calculate error rates
+To interpret these plots, click [HERE](https://benjjneb.github.io/dada2/tutorial.html#learn-the-error-rates)
+```{r}
+ErrF=learnErrors(filtFs, multithread=TRUE)
+ErrR=learnErrors(filtRs, multithread=TRUE)
+plotErrors(ErrF, nominalQ=TRUE)
+plotErrors(ErrR, nominalQ=TRUE)
+```
+
+### The main attraction! the DADA function
+This function calculates unique sequences and their abundance
+```{r}
+derepFs=derepFastq(filtFs, verbose=TRUE) # 2258995 unique sequences in 5489790 sequences read
+derepRs=derepFastq(filtRs, verbose=TRUE) # 1479233 unique sequences in 5489790 sequences read
+
+names(derepFs)=sample.names
+names(derepRs)=sample.names
+
+dadaFs= dada(derepFs, err=ErrF, multithread=TRUE) # this one took over 3 hrs it got stuck on sample 30 - removed sample 30, it was the unpaired seqs
+dadaRs= dada(derepRs, err=ErrR, multithread=TRUE)
+
+dadaFs[[1]]  # check them
+dadaFs[[2]]
+dadaRs[[1]]
+```
+
+## Post-dada processing
+### Merge paired reads
+```{r}
+mergers=mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+
+head(mergers[[1]]) # check them
+head(mergers[[3]])
+
+```
+
+### contruct the ASV table with merged reads
+This is your main output
+```{r}
+seqtab=makeSequenceTable(mergers)
+dim(seqtab) # 3114 ASVs and 382 samples
+```
+
+### ID and remove chimeras
+This is the step where you save your output
+```{r}
+seqtab.nochim=removeBimeraDenovo(seqtab, method='consensus', multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim) # 2562 ASVs and 382 samples
+sum(seqtab.nochim)/sum(seqtab) # the frequency of chimeric sequences =0.991  (< 1%)
+saveRDS(seqtab.nochim, paste('SeqJob_ASVnochim',Curr.date,'.rds', sep='_'))
+```
+
+### Track the number of reads as you progress through the pipeline
+This table should probably be part of apendixes to be transparent about sample processing steps, read quality and lost reads.
+```{r}
+getN=function(x) sum(getUniques(x))
+track=cbind(OUT, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# if processing a single sample remove the sapply calls, just use getN
+colnames(track)=c('input', 'filtered', 'denoisedF', 'denoisedR', 'merged', 'nochim')
+rownames(track)=sample.names
+head(track) # 
+sum(track[,6]) # 10489828 total reads
+mean(track[,6]) # mean of 27460 
+sd(track[,6]) # standard deviation of 38736
+max(track[,6]) # max reads 325018
+min(track[,6]) # 93
+```
+
+### Assign Taxonomy
+Save your taxonomy table. This step may take some time. 
+```{r}
+taxa= assignTaxonomy(seqtab.nochim, paste(Path.seq, '/silva_nr99_v138_train_set.fa.gz', sep=''), multithread=TRUE)
+# inspect taxonomy
+taxa.print=taxa
+rownames(taxa.print) = NULL
+head(taxa.print)
+# save taxonomy 
+saveRDS(taxa, paste('Taxa', Curr.date, '.rds', sep='_'))
+
+```
+
+### (optional) Separate into file per project:
+```{r}
+# list of projects:
+mappingFile_proj2_ord$Project
+
+# Divide the mapping file per project
+Proj1_mapFile=mappingFile_proj2_ord[which(mappingFile_proj2_ord$Project==mappingFile_proj2_ord$Project[1]),]
+# Extract the samples from the ASV table
+head(seqtab.nochim)
+Proj1_seqtab.nochim=seqtab.nochim[which(rownames(seqtab.nochim)%in%Proj1_mapFile$Sampleid2),]
+# check dimensions
+dim(Proj_seqtab.nochim)
+# write new file
+saveRDS(Proj1_seqtab.nochim, 'SeqJob_ASVnochim',Curr.date,'.rds', sep='_')
+
+```
+
