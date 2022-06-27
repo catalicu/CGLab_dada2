@@ -13,6 +13,12 @@ See a referecence tutorial [HERE](https://benjjneb.github.io/dada2/tutorial.html
 ### Load required packages
 ```{r}
 library(Rcpp) #1.0.8.3
+#install.packages('BiocManager')
+#library(BiocManager)
+BiocManager::install('Rhtslib')
+BiocManager::install('ShortRead')
+BiocManager::install('dada2')
+devtools::install_github('benjjneb/dada2')
 library(dada2) #1.24.0
 library(phyloseq) #1.40.0
 library(ggplot2) #3.3.6
